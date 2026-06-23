@@ -20,6 +20,12 @@ To modify the app without breaking its core features, two major hurdles were ana
 
 ---
 
+## ⚠️ Important Limitation: Google Sign-In
+* **Note:** Because the patched app is resigned with a custom certificate, **"Login with Google" will not work**. Google Play Services verifies the app signature at the OS level (which our client-side spoofer cannot bypass) and compares it with the developer console registration. 
+* **Workaround:** Please use the **Email Login** feature instead. It works perfectly with the patched APK.
+
+---
+
 ## 🛠️ Mod patches in this Repo (`patch-files/`)
 
 * **`com/anslayer/App.smali`**

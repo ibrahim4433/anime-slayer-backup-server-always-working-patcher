@@ -4,6 +4,8 @@ import subprocess
 import sys
 import shutil
 import glob
+import urllib.request
+import zipfile
 
 def run_command(cmd, shell=True):
     print(f"Executing: {cmd}")
@@ -22,10 +24,63 @@ def format_byte(b):
     else:
         return f"0x{sb:x}t"
 
-def generate_spoofer_files(cert_path, output_dir):
-    with open(cert_path, "rb") as f:
-        cert_bytes = f.read()
+def extract_cert_from_pkcs7(data, offset=0):
+    while offset < len(data):
+        if offset + 2 > len(data):
+            break
+        tag = data[offset]
+        len_byte = data[offset + 1]
+        idx = offset + 2
+        if len_byte & 0x80:
+            num_bytes = len_byte & 0x7f
+            if idx + num_bytes > len(data):
+                break
+            length = 0
+            for _ in range(num_bytes):
+                length = (length << 8) | data[idx]
+                idx += 1
+        else:
+            length = len_byte
+        if tag == 0xa0:
+            if idx + 2 <= len(data) and data[idx] == 0x30:
+                c_len_byte = data[idx+1]
+                v_idx = idx + 2
+                if c_len_byte & 0x80:
+                    v_idx += (c_len_byte & 0x7f)
+                if v_idx < len(data) and data[v_idx] == 0x30:
+                    c_tag = data[idx]
+                    c_idx = idx + 2
+                    if c_len_byte & 0x80:
+                        c_num_bytes = c_len_byte & 0x7f
+                        c_length = 0
+                        for _ in range(c_num_bytes):
+                            c_length = (c_length << 8) | data[c_idx]
+                            c_idx += 1
+                    else:
+                        c_length = c_len_byte
+                    cert_end = c_idx + c_length
+                    if cert_end <= len(data):
+                        return data[idx:cert_end]
+        if tag in (0x30, 0x31, 0xa0):
+            res = extract_cert_from_pkcs7(data[idx:idx+length])
+            if res is not None:
+                return res
+        offset = idx + length
+    return None
 
+def extract_cert_from_apk(apk_path):
+    try:
+        with zipfile.ZipFile(apk_path, 'r') as z:
+            for name in z.namelist():
+                if name.startswith("META-INF/") and (name.endswith(".RSA") or name.endswith(".DSA")):
+                    print(f"[+] Extracting original signature metadata ({name})...")
+                    pkcs7_bytes = z.read(name)
+                    return extract_cert_from_pkcs7(pkcs7_bytes)
+    except Exception as e:
+        print(f"[-] Failed to read original signature from APK: {e}")
+    return None
+
+def generate_spoofer_files(cert_bytes, output_dir):
     formatted_bytes = "\n        ".join(format_byte(b) for b in cert_bytes)
     cert_len = len(cert_bytes)
 
@@ -439,13 +494,82 @@ def copy_folder_recursive(src, dst):
         else:
             shutil.copy2(s, d)
 
+def download_apktool():
+    url = "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
+    local_path = "apktool.jar"
+    print(f"[+] Downloading apktool.jar from {url}...")
+    try:
+        urllib.request.urlretrieve(url, local_path)
+        print("[+] Download complete.")
+        return True
+    except Exception as e:
+        print(f"[-] Failed to download apktool.jar: {e}")
+        print("    Please download it manually and place it in this folder as 'apktool.jar'")
+        return False
+
+def get_apktool_command(java_cmd):
+    # Check if local apktool.jar exists
+    if os.path.exists("apktool.jar"):
+        if java_cmd:
+            return f'"{java_cmd}" -jar "apktool.jar"'
+    
+    # Check if apktool is in PATH
+    apktool_cmd = shutil.which("apktool")
+    if apktool_cmd:
+        return f'"{apktool_cmd}"'
+    
+    # Download apktool.jar if missing
+    if download_apktool():
+        if java_cmd:
+            return f'"{java_cmd}" -jar "apktool.jar"'
+            
+    return None
+
 def main():
     repo_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(repo_dir)
 
     print("=== Anime Slayer APK Automated Patch Utility ===")
 
-    # 1. Locate original APK file
+    # 1. Check requirements (Java)
+    java_cmd = shutil.which("java")
+    if not java_cmd:
+        print("[-] Java not found in system PATH!")
+        if sys.platform != 'win32':
+            print("    Please run: sudo apt update && sudo apt install -y default-jdk")
+        else:
+            print("    Please install Java JDK/JRE from: https://adoptium.net/")
+        sys.exit(1)
+
+    keytool_cmd = shutil.which("keytool")
+    if not keytool_cmd:
+        # Check adjacent directory
+        java_dir = os.path.dirname(java_cmd)
+        potential_keytool = os.path.join(java_dir, "keytool" + (".exe" if sys.platform == "win32" else ""))
+        if os.path.exists(potential_keytool):
+            keytool_cmd = potential_keytool
+        else:
+            print("[-] keytool not found! Make sure Java JDK (not JRE) is installed.")
+            sys.exit(1)
+
+    jarsigner_cmd = shutil.which("jarsigner")
+    if not jarsigner_cmd:
+        # Check adjacent directory
+        java_dir = os.path.dirname(java_cmd)
+        potential_jarsigner = os.path.join(java_dir, "jarsigner" + (".exe" if sys.platform == "win32" else ""))
+        if os.path.exists(potential_jarsigner):
+            jarsigner_cmd = potential_jarsigner
+        else:
+            print("[-] jarsigner not found! Make sure Java JDK (not JRE) is installed.")
+            sys.exit(1)
+
+    # Resolve apktool
+    apktool_cmd = get_apktool_command(java_cmd)
+    if not apktool_cmd:
+        print("[-] apktool wrapper/jar not found and download failed!")
+        sys.exit(1)
+
+    # 2. Locate original APK file
     apk_files = glob.glob(os.path.join(repo_dir, "*v1.5.10*.apk"))
     if not apk_files:
         apk_files = glob.glob(os.path.join(repo_dir, "*.apk"))
@@ -460,55 +584,42 @@ def main():
     target_apk = apk_files[0]
     print(f"[+] Found Target APK: {os.path.basename(target_apk)}")
 
+    # Check readability of input APK (permissions check on WSL/Linux)
+    if not os.access(target_apk, os.R_OK):
+        print(f"[-] Error: Input file '{os.path.basename(target_apk)}' is not readable!")
+        if sys.platform != 'win32':
+            # WSL / Linux path permission issue
+            print("    Your WSL environment does not have read permissions for this file.")
+            print("    Please run the following command to fix it:")
+            print(f'    sudo chmod 644 "{target_apk}"')
+        else:
+            print("    Please check the read permissions of this APK file.")
+        sys.exit(1)
+
+    # 3. Extract original certificate from APK ZIP directory directly
+    cert_bytes = extract_cert_from_apk(target_apk)
+    if not cert_bytes:
+        print("[-] Failed to extract original certificate from the APK!")
+        sys.exit(1)
+    print(f"[+] Original certificate extracted successfully ({len(cert_bytes)} bytes).")
+
     temp_dir = os.path.join(repo_dir, "temp-decompiled")
     if os.path.exists(temp_dir):
         print("[+] Cleaning up previous temporary folders...")
         shutil.rmtree(temp_dir)
 
-    # 2. Decompile using apktool (ignore resources for speed and compatibility)
+    # 4. Decompile using apktool (ignoring resources)
     print("[+] Decompiling APK (ignoring resources for speed and compatibility)...")
-    success, _, _ = run_command(f'apktool d -r "{target_apk}" -o "{temp_dir}"')
+    success, _, _ = run_command(f'{apktool_cmd} d -r "{target_apk}" -o "{temp_dir}"')
     if not success:
-        print("[-] Decompilation failed. Ensure apktool is installed and in your PATH.")
+        print("[-] Decompilation failed.")
         sys.exit(1)
 
-    # 3. Extract original certificate from decompiled folder
-    cert_rsa = os.path.join(temp_dir, "original", "META-INF", "CERT.RSA")
-    if not os.path.exists(cert_rsa):
-        # Look for other names
-        metainf_dir = os.path.join(temp_dir, "original", "META-INF")
-        rsa_files = glob.glob(os.path.join(metainf_dir, "*.RSA")) + glob.glob(os.path.join(metainf_dir, "*.DSA"))
-        if rsa_files:
-            cert_rsa = rsa_files[0]
-        else:
-            print("[-] Original CERT.RSA not found in decompiled APK metadata!")
-            shutil.rmtree(temp_dir)
-            sys.exit(1)
-
-    cert_pem = "/tmp/cert.pem"
-    cert_der = "/tmp/cert.der"
-
-    print("[+] Extracting original certificate metadata...")
-    success, _, _ = run_command(f'openssl pkcs7 -inform DER -in "{cert_rsa}" -print_certs -out "{cert_pem}"')
-    if not success:
-        shutil.rmtree(temp_dir)
-        sys.exit(1)
-
-    success, _, _ = run_command(f'openssl x509 -inform PEM -in "{cert_pem}" -outform DER -out "{cert_der}"')
-    if not success:
-        shutil.rmtree(temp_dir)
-        sys.exit(1)
-
-    # 4. Generate dynamic SignatureSpoofer smali files
+    # 5. Generate dynamic SignatureSpoofer smali files
     spoofer_dir = os.path.join(temp_dir, "smali", "com", "anslayer")
-    generate_spoofer_files(cert_der, spoofer_dir)
+    generate_spoofer_files(cert_bytes, spoofer_dir)
 
-    # Clean up temp cert files
-    for f in [cert_pem, cert_der]:
-        if os.path.exists(f):
-            os.remove(f)
-
-    # 5. Overwrite/apply patches from patch-files folder
+    # 6. Overwrite/apply patches from patch-files folder
     patches_src = os.path.join(repo_dir, "patch-files")
     if not os.path.exists(patches_src):
         print("[-] patch-files folder not found! Cannot apply mod patches.")
@@ -519,24 +630,24 @@ def main():
     patches_dst = os.path.join(temp_dir, "smali")
     copy_folder_recursive(patches_src, patches_dst)
 
-    # 6. Rebuild APK
+    # 7. Rebuild APK
     patched_apk = os.path.join(repo_dir, "anime-slayer-patched.apk")
     print("[+] Rebuilding patched APK (assembling smali bytecode)...")
-    success, _, _ = run_command(f'apktool b "{temp_dir}" -o "{patched_apk}"')
+    success, _, _ = run_command(f'{apktool_cmd} b "{temp_dir}" -o "{patched_apk}"')
     if not success:
         print("[-] Compilation failed.")
         shutil.rmtree(temp_dir)
         sys.exit(1)
 
-    # 7. Keystore Handling and Signing
-    keystore_path = "/tmp/my-release-key.jks"
+    # 8. Keystore Handling and Signing
+    keystore_path = os.path.join(repo_dir, "local-release-key.jks")
     keystore_alias = "alias_name"
     keystore_pass = "android"
 
     if not os.path.exists(keystore_path):
         print("[+] Generating temporary release signing key...")
         genkey_cmd = (
-            f'keytool -genkey -v -keystore "{keystore_path}" -keyalg RSA -keysize 2048 -validity 10000 '
+            f'"{keytool_cmd}" -genkey -v -keystore "{keystore_path}" -keyalg RSA -keysize 2048 -validity 10000 '
             f'-alias "{keystore_alias}" -storepass "{keystore_pass}" -keypass "{keystore_pass}" '
             f'-dname "CN=Android Debug,O=Android,C=US"'
         )
@@ -548,7 +659,7 @@ def main():
 
     print("[+] Signing the patched APK...")
     sign_cmd = (
-        f'jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 '
+        f'"{jarsigner_cmd}" -verbose -sigalg SHA256withRSA -digestalg SHA-256 '
         f'-keystore "{keystore_path}" -storepass "{keystore_pass}" -keypass "{keystore_pass}" '
         f'"{patched_apk}" "{keystore_alias}"'
     )
@@ -558,13 +669,15 @@ def main():
         shutil.rmtree(temp_dir)
         sys.exit(1)
 
-    # 8. Clean up decompiled workspace
+    # 9. Clean up decompiled workspace
     print("[+] Cleaning up decompiled workspace directory...")
     shutil.rmtree(temp_dir)
 
     final_name = "Anime_Slayer_v1.5.10_Patched_Working.apk"
     final_path = os.path.join(repo_dir, final_name)
     if os.path.exists(patched_apk):
+        if os.path.exists(final_path):
+            os.remove(final_path)
         shutil.move(patched_apk, final_path)
 
     print(f"\n[+] SUCCESS! Final patched and signed APK generated at: {final_path}")
