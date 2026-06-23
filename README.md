@@ -37,25 +37,20 @@ To modify the app without breaking its core features, two major hurdles were ana
 
 *(The Signature Spoofer itself is dynamically generated based on the original APK certificate and injected during the build process)*
 
----
-
 ## 🚀 Build & Patch Automation
 
-We have provided a self-contained automation script `patch_apk.py` that builds your patched APK in one step.
+We have provided a fully self-contained, cross-platform automation script `patch_apk.py` that handles the entire pipeline on both **Windows** and **Linux/WSL**.
 
 ### Prerequisites
-Make sure you have the following installed on your machine:
 * **Python 3.x**
-* **Java Development Kit (JDK)** (for `jarsigner` and `keytool`)
-* **Apktool** (available in your PATH as `apktool`)
-* **OpenSSL** (for certificate extraction)
+* **Java Development Kit (JDK)** (for compiler execution, signing, and key generation)
+* *(Note: `apktool` and `openssl` are NOT required! The script will automatically download `apktool.jar` if missing, and certificate extraction is done in pure Python).*
 
 ### How to Patch and Build
-1. Put the **original Anime Slayer v1.5.10 APK** file in this repository folder.
+1. Place the **original Anime Slayer v1.5.10 APK** in this repository folder.
 2. Run the script:
-   ```bash
-   python3 patch_apk.py
-   ```
+   * **Linux/WSL:** `python3 patch_apk.py`
+   * **Windows:** `python patch_apk.py`
 
 ### What the script does under the hood:
 1. **Decompiles:** Automatically decompiles the original APK to a temporary directory.
