@@ -1,0 +1,18 @@
+# Ignore apktool build output and caches
+apktool-output/build/
+
+# Ignore local keys and certs
+*.jks
+*.keystore
+*.der
+*.pem
+
+# Ignore all APK files (avoids repository bloat and DMCA copyright issues)
+*.apk
+
+# Ignore logs
+*.log
+logcat.txt
+
+# Ignore IDE temporary files
+unleash-repo-schema-v1-codeium-language-server.json
