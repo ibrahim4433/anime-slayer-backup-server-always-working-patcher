@@ -508,25 +508,23 @@ def download_apktool():
         return False
 
 def get_apktool_command(java_cmd):
-    # Check if local apktool.jar exists
     if os.path.exists("apktool.jar"):
         if java_cmd:
             return f'"{java_cmd}" -jar "apktool.jar"'
     
-    # Check if apktool is in PATH
     apktool_cmd = shutil.which("apktool")
     if apktool_cmd:
         return f'"{apktool_cmd}"'
     
-    # Download apktool.jar if missing
     if download_apktool():
         if java_cmd:
             return f'"{java_cmd}" -jar "apktool.jar"'
             
+    return None
+
 def find_java_windows():
     if sys.platform != 'win32':
         return None
-    # Check common install directories for Java
     program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
     program_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
     
@@ -542,10 +540,17 @@ def find_java_windows():
         if os.path.exists(base):
             for root, dirs, files in os.walk(base):
                 if "java.exe" in files:
-                    # Verify it has keytool and jarsigner adjacent
                     if "keytool.exe" in files and "jarsigner.exe" in files:
                         return os.path.join(root, "java.exe")
     return None
+
+def fix_invalid_resource_names(decompiled_dir):
+    # No longer needed: we use -r (raw resources) mode which preserves the
+    # original AndResGuard-obfuscated resource paths exactly as they are in
+    # resources.arsc. Renaming was only required when apktool decoded resources
+    # to human-readable names, which caused a mismatch with the original
+    # resources.arsc that still referenced the short obfuscated paths.
+    pass
 
 def main():
     repo_dir = os.path.dirname(os.path.abspath(__file__))
@@ -556,7 +561,6 @@ def main():
     # 1. Check requirements (Java)
     java_cmd = shutil.which("java")
     if not java_cmd and sys.platform == 'win32':
-        # Try to locate Java automatically in typical Windows installation folders
         java_cmd = find_java_windows()
 
     if not java_cmd:
@@ -570,7 +574,6 @@ def main():
 
     keytool_cmd = shutil.which("keytool")
     if not keytool_cmd:
-        # Check adjacent directory
         java_dir = os.path.dirname(java_cmd)
         potential_keytool = os.path.join(java_dir, "keytool" + (".exe" if sys.platform == "win32" else ""))
         if os.path.exists(potential_keytool):
@@ -581,7 +584,6 @@ def main():
 
     jarsigner_cmd = shutil.which("jarsigner")
     if not jarsigner_cmd:
-        # Check adjacent directory
         java_dir = os.path.dirname(java_cmd)
         potential_jarsigner = os.path.join(java_dir, "jarsigner" + (".exe" if sys.platform == "win32" else ""))
         if os.path.exists(potential_jarsigner):
@@ -590,7 +592,6 @@ def main():
             print("[-] jarsigner not found! Make sure Java JDK (not JRE) is installed.")
             sys.exit(1)
 
-    # Resolve apktool
     apktool_cmd = get_apktool_command(java_cmd)
     if not apktool_cmd:
         print("[-] apktool wrapper/jar not found and download failed!")
@@ -600,7 +601,6 @@ def main():
     apk_files = glob.glob(os.path.join(repo_dir, "*v1.5.10*.apk"))
     if not apk_files:
         apk_files = glob.glob(os.path.join(repo_dir, "*.apk"))
-        # Exclude output patches
         apk_files = [f for f in apk_files if "_Patched_" not in f and "-patched" not in f]
 
     if not apk_files:
@@ -611,11 +611,10 @@ def main():
     target_apk = apk_files[0]
     print(f"[+] Found Target APK: {os.path.basename(target_apk)}")
 
-    # Check readability of input APK (permissions check on WSL/Linux)
+    # Check readability of input APK
     if not os.access(target_apk, os.R_OK):
         print(f"[-] Error: Input file '{os.path.basename(target_apk)}' is not readable!")
         if sys.platform != 'win32':
-            # WSL / Linux path permission issue
             print("    Your WSL environment does not have read permissions for this file.")
             print("    Please run the following command to fix it:")
             print(f'    sudo chmod 644 "{target_apk}"')
@@ -623,7 +622,7 @@ def main():
             print("    Please check the read permissions of this APK file.")
         sys.exit(1)
 
-    # 3. Extract original certificate from APK ZIP directory directly
+    # 3. Extract original certificate
     cert_bytes = extract_cert_from_apk(target_apk)
     if not cert_bytes:
         print("[-] Failed to extract original certificate from the APK!")
@@ -635,18 +634,29 @@ def main():
         print("[+] Cleaning up previous temporary folders...")
         shutil.rmtree(temp_dir)
 
-    # 4. Decompile using apktool (ignoring resources)
-    print("[+] Decompiling APK (ignoring resources for speed and compatibility)...")
+    # 4. Decompile using apktool
+    # NOTE: We use -r (raw/no-res) to skip resource decoding.
+    # This APK uses AndResGuard obfuscation: resources are stored with short
+    # obfuscated paths (e.g. res/hq.xml) and resources.arsc references those
+    # exact paths. If apktool decodes resources it renames them to human-readable
+    # names (e.g. res/drawable/abc_vector_test.xml) but then copies the original
+    # resources.arsc unchanged — so the table still points to res/hq.xml which
+    # no longer exists in the rebuilt APK, causing an instant crash at startup.
+    # Using -r keeps the raw res/ files and resources.arsc in sync.
+    print("[+] Decompiling APK (this may take a minute)...")
     success, _, _ = run_command(f'{apktool_cmd} d -r "{target_apk}" -o "{temp_dir}"')
     if not success:
         print("[-] Decompilation failed.")
         sys.exit(1)
 
-    # 5. Generate dynamic SignatureSpoofer smali files
+    # 5. Fix invalid resource names containing $
+    fix_invalid_resource_names(temp_dir)
+
+    # 6. Generate dynamic SignatureSpoofer smali files
     spoofer_dir = os.path.join(temp_dir, "smali", "com", "anslayer")
     generate_spoofer_files(cert_bytes, spoofer_dir)
 
-    # 6. Overwrite/apply patches from patch-files folder
+    # 7. Overwrite/apply patches from patch-files folder
     patches_src = os.path.join(repo_dir, "patch-files")
     if not os.path.exists(patches_src):
         print("[-] patch-files folder not found! Cannot apply mod patches.")
@@ -657,16 +667,18 @@ def main():
     patches_dst = os.path.join(temp_dir, "smali")
     copy_folder_recursive(patches_src, patches_dst)
 
-    # 7. Rebuild APK
+    # 8. Rebuild APK
+    # Since we used -r, apktool only needs to re-smali the .dex and copy raw
+    # resources — no aapt2 resource compilation step needed.
     patched_apk = os.path.join(repo_dir, "anime-slayer-patched.apk")
-    print("[+] Rebuilding patched APK (assembling smali bytecode)...")
+    print("[+] Rebuilding patched APK...")
     success, _, _ = run_command(f'{apktool_cmd} b "{temp_dir}" -o "{patched_apk}"')
     if not success:
         print("[-] Compilation failed.")
         shutil.rmtree(temp_dir)
         sys.exit(1)
 
-    # 8. Keystore Handling and Signing
+    # 9. Keystore Handling and Signing
     keystore_path = os.path.join(repo_dir, "local-release-key.jks")
     keystore_alias = "alias_name"
     keystore_pass = "android"
@@ -696,7 +708,7 @@ def main():
         shutil.rmtree(temp_dir)
         sys.exit(1)
 
-    # 9. Clean up decompiled workspace
+    # 10. Clean up decompiled workspace
     print("[+] Cleaning up decompiled workspace directory...")
     shutil.rmtree(temp_dir)
 
