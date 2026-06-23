@@ -522,6 +522,14 @@ def get_apktool_command(java_cmd):
             
     return None
 
+def is_wsl():
+    """Detect if we are running inside Windows Subsystem for Linux (WSL)."""
+    try:
+        with open('/proc/version', 'r') as f:
+            return 'microsoft' in f.read().lower()
+    except Exception:
+        return False
+
 def find_java_windows():
     if sys.platform != 'win32':
         return None
@@ -613,38 +621,73 @@ def main():
 
     # Check readability of input APK
     if not os.access(target_apk, os.R_OK):
-        print(f"[-] Error: Input file '{os.path.basename(target_apk)}' is not readable!")
-        if sys.platform != 'win32':
-            print("    Your WSL environment does not have read permissions for this file.")
-            print("    Please run the following command to fix it:")
-            print(f'    sudo chmod 644 "{target_apk}"')
+        # On Linux/WSL with an NTFS-mounted path the file may be owned by the
+        # Windows user (UID 10067) and not readable by the WSL user (UID 1000).
+        # The user must fix permissions first — chmod via WSL doesn't work on
+        # NTFS, but changing the file's Windows ACL does.
+        if sys.platform != 'win32' and target_apk.startswith('/mnt/'):
+            print(f"[-] Cannot read APK: {os.path.basename(target_apk)}")
+            print("    The file has Windows-only read permissions.")
+            print("    Fix by running this in your Windows Command Prompt (cmd.exe):")
+            apk_win = target_apk.replace('/mnt/c/', 'C:\\\\').replace('/', '\\\\')
+            print(f"        icacls \"{apk_win}\" /grant Everyone:R")
+            print("    Or right-click the APK in Explorer > Properties > Security > Edit")
+            print("    and grant Read permission to your Windows user.")
         else:
-            print("    Please check the read permissions of this APK file.")
+            print(f"[-] Error: Input file '{os.path.basename(target_apk)}' is not readable!")
+            if sys.platform != 'win32':
+                print(f'    Please run: chmod 644 "{target_apk}"')
+            else:
+                print("    Please check the read permissions of this APK file.")
         sys.exit(1)
 
-    # 3. Extract original certificate
-    cert_bytes = extract_cert_from_apk(target_apk)
+    # --- Temp directory strategy ---
+    # IMPORTANT: This APK uses AndResGuard obfuscation. It contains BOTH
+    # 'res/hq.xml' AND 'res/HQ.xml' (different case, same Windows path).
+    # On Windows/NTFS (case-insensitive), these two files collide and only
+    # one survives when apktool extracts them — the other is silently lost.
+    # At runtime, resources.arsc references res/hq.xml which doesn't exist
+    # in the rebuilt APK → FileNotFoundException: res/hq.xml → instant crash.
+    #
+    # Fix: on Linux/WSL always use /tmp (native Linux ext4, case-sensitive)
+    # so both res/hq.xml and res/HQ.xml are preserved correctly.
+    # On Windows we warn but still try (may crash on device if hq.xml lost).
+    on_linux = (sys.platform != 'win32')
+    if on_linux:
+        import tempfile
+        temp_dir = tempfile.mkdtemp(prefix='anslayer-patch-')
+        # If the APK is on an NTFS mount (/mnt/c/...) copy it to Linux-native
+        # /tmp so it is always readable and has correct case-sensitive filenames.
+        apk_linux_path = target_apk
+        if target_apk.startswith('/mnt/'):
+            apk_tmp = '/tmp/anslayer_source.apk'
+            print(f"[+] Copying APK to Linux temp path for reliable extraction...")
+            shutil.copy2(target_apk, apk_tmp)
+            apk_linux_path = apk_tmp
+    else:
+        print("[!] WARNING: Running on Windows. The APK contains case-conflicting")
+        print("    resource files (res/hq.xml vs res/HQ.xml) that Windows cannot")
+        print("    distinguish. The patched APK may crash on launch.")
+        print("    For a working patch, run this script under WSL (Linux).")
+        apk_linux_path = target_apk
+        temp_dir = os.path.join(repo_dir, "temp-decompiled")
+        if os.path.exists(temp_dir):
+            print("[+] Cleaning up previous temporary folders...")
+            shutil.rmtree(temp_dir)
+
+    # 3. Extract original certificate (from the Linux-readable APK path)
+    cert_bytes = extract_cert_from_apk(apk_linux_path)
     if not cert_bytes:
         print("[-] Failed to extract original certificate from the APK!")
         sys.exit(1)
     print(f"[+] Original certificate extracted successfully ({len(cert_bytes)} bytes).")
 
-    temp_dir = os.path.join(repo_dir, "temp-decompiled")
-    if os.path.exists(temp_dir):
-        print("[+] Cleaning up previous temporary folders...")
-        shutil.rmtree(temp_dir)
-
-    # 4. Decompile using apktool
-    # NOTE: We use -r (raw/no-res) to skip resource decoding.
-    # This APK uses AndResGuard obfuscation: resources are stored with short
-    # obfuscated paths (e.g. res/hq.xml) and resources.arsc references those
-    # exact paths. If apktool decodes resources it renames them to human-readable
-    # names (e.g. res/drawable/abc_vector_test.xml) but then copies the original
-    # resources.arsc unchanged — so the table still points to res/hq.xml which
-    # no longer exists in the rebuilt APK, causing an instant crash at startup.
-    # Using -r keeps the raw res/ files and resources.arsc in sync.
-    print("[+] Decompiling APK (this may take a minute)...")
-    success, _, _ = run_command(f'{apktool_cmd} d -r "{target_apk}" -o "{temp_dir}"')
+    # 4. Decompile using apktool with -r (raw resources / no resource decoding).
+    # We skip resource decoding (-r) for two reasons:
+    #  a) resources.arsc is kept original and stays in sync with the raw res/ files.
+    #  b) Much faster: no XML decoding/recompilation needed.
+    print("[+] Decompiling APK (raw mode, this is fast)...")
+    success, _, _ = run_command(f'{apktool_cmd} d -r "{apk_linux_path}" -o "{temp_dir}"')
     if not success:
         print("[-] Decompilation failed.")
         sys.exit(1)
@@ -668,9 +711,12 @@ def main():
     copy_folder_recursive(patches_src, patches_dst)
 
     # 8. Rebuild APK
-    # Since we used -r, apktool only needs to re-smali the .dex and copy raw
-    # resources — no aapt2 resource compilation step needed.
-    patched_apk = os.path.join(repo_dir, "anime-slayer-patched.apk")
+    # Since we used -r, apktool only re-smals the .dex; resources are raw-copied.
+    # Keep the intermediate APK in /tmp (Linux) to avoid NTFS path issues.
+    if on_linux:
+        patched_apk = '/tmp/anslayer-patched.apk'
+    else:
+        patched_apk = os.path.join(repo_dir, "anime-slayer-patched.apk")
     print("[+] Rebuilding patched APK...")
     success, _, _ = run_command(f'{apktool_cmd} b "{temp_dir}" -o "{patched_apk}"')
     if not success:
@@ -711,16 +757,22 @@ def main():
     # 10. Clean up decompiled workspace
     print("[+] Cleaning up decompiled workspace directory...")
     shutil.rmtree(temp_dir)
+    # Clean up Linux temp APK copy if we made one
+    if on_linux and 'apk_tmp' in dir() and os.path.exists(apk_tmp):
+        os.remove(apk_tmp)
 
+    # Copy final APK back to repo dir (which may be a Windows NTFS mount)
     final_name = "Anime_Slayer_v1.5.10_Patched_Working.apk"
     final_path = os.path.join(repo_dir, final_name)
     if os.path.exists(patched_apk):
         if os.path.exists(final_path):
             os.remove(final_path)
-        shutil.move(patched_apk, final_path)
+        shutil.copy2(patched_apk, final_path)
+        if on_linux and patched_apk != final_path:
+            os.remove(patched_apk)
 
-    print(f"\n[+] SUCCESS! Final patched and signed APK generated at: {final_path}")
-    print("    You can now copy and install this file on your device.")
+    print(f"\n[+] SUCCESS! Final patched and signed APK: {final_path}")
+    print("    You can now install this file on your device.")
 
 if __name__ == "__main__":
     main()
