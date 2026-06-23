@@ -552,13 +552,51 @@ def find_java_windows():
                         return os.path.join(root, "java.exe")
     return None
 
-def fix_invalid_resource_names(decompiled_dir):
-    # No longer needed: we use -r (raw resources) mode which preserves the
-    # original AndResGuard-obfuscated resource paths exactly as they are in
-    # resources.arsc. Renaming was only required when apktool decoded resources
-    # to human-readable names, which caused a mismatch with the original
-    # resources.arsc that still referenced the short obfuscated paths.
-    pass
+def fix_missing_case_sensitive_resources(original_apk_path, patched_apk_path):
+    """
+    On Windows, NTFS collapses case-differing filenames (e.g. res/hq.xml and
+    res/HQ.xml) into one file when apktool extracts them to disk. The rebuilt
+    APK then silently drops the lowercase variant, causing a crash at runtime
+    because resources.arsc still points to res/hq.xml.
+
+    Fix: Python's zipfile module treats zip entries as raw strings — it IS
+    case-sensitive even on Windows. We compare the original APK's entry list
+    against the built APK, find any res/ entries that are missing by exact
+    case, and inject them directly from the original APK into the built one,
+    never touching the NTFS filesystem for those files.
+    """
+    with zipfile.ZipFile(original_apk_path, 'r') as orig_z:
+        orig_names = set(orig_z.namelist())
+    with zipfile.ZipFile(patched_apk_path, 'r') as built_z:
+        built_names = set(built_z.namelist())
+
+    # Only care about res/ files — META-INF etc. are intentionally different
+    missing_res = {n for n in (orig_names - built_names) if n.startswith('res/')}
+
+    if not missing_res:
+        print("[+] No missing case-sensitive resources detected.")
+        return
+
+    print(f"[+] Injecting {len(missing_res)} case-sensitive resource(s) lost on Windows NTFS:")
+    for name in sorted(missing_res):
+        print(f"      + {name}")
+
+    # Rebuild the APK zip with the missing entries added in.
+    # We write to a temp file then replace atomically.
+    tmp_path = patched_apk_path + '.fixing'
+    with zipfile.ZipFile(patched_apk_path, 'r') as built_z, \
+         zipfile.ZipFile(tmp_path, 'w', compression=zipfile.ZIP_STORED) as out_z:
+        # Copy every existing entry preserving compression and metadata
+        for info in built_z.infolist():
+            out_z.writestr(info, built_z.read(info.filename))
+        # Inject the missing ones straight from the original APK bytes
+        with zipfile.ZipFile(original_apk_path, 'r') as orig_z:
+            for name in sorted(missing_res):
+                orig_info = orig_z.getinfo(name)
+                out_z.writestr(orig_info, orig_z.read(name))
+
+    os.replace(tmp_path, patched_apk_path)
+    print(f"[+] Successfully restored {len(missing_res)} resource(s). APK is now correct.")
 
 def main():
     repo_dir = os.path.dirname(os.path.abspath(__file__))
@@ -642,33 +680,22 @@ def main():
         sys.exit(1)
 
     # --- Temp directory strategy ---
-    # IMPORTANT: This APK uses AndResGuard obfuscation. It contains BOTH
-    # 'res/hq.xml' AND 'res/HQ.xml' (different case, same Windows path).
-    # On Windows/NTFS (case-insensitive), these two files collide and only
-    # one survives when apktool extracts them — the other is silently lost.
-    # At runtime, resources.arsc references res/hq.xml which doesn't exist
-    # in the rebuilt APK → FileNotFoundException: res/hq.xml → instant crash.
-    #
-    # Fix: on Linux/WSL always use /tmp (native Linux ext4, case-sensitive)
-    # so both res/hq.xml and res/HQ.xml are preserved correctly.
-    # On Windows we warn but still try (may crash on device if hq.xml lost).
+    # On Linux/WSL: use /tmp (native ext4, case-sensitive) so both res/hq.xml
+    # AND res/HQ.xml survive apktool extraction untouched.
+    # On Windows: use a local temp-decompiled folder. After apktool builds,
+    # we run fix_missing_case_sensitive_resources() which uses Python's zipfile
+    # (case-sensitive even on Windows) to inject any dropped files back in.
     on_linux = (sys.platform != 'win32')
     if on_linux:
         import tempfile
         temp_dir = tempfile.mkdtemp(prefix='anslayer-patch-')
-        # If the APK is on an NTFS mount (/mnt/c/...) copy it to Linux-native
-        # /tmp so it is always readable and has correct case-sensitive filenames.
         apk_linux_path = target_apk
         if target_apk.startswith('/mnt/'):
             apk_tmp = '/tmp/anslayer_source.apk'
-            print(f"[+] Copying APK to Linux temp path for reliable extraction...")
+            print("[+] Copying APK to Linux temp path for reliable extraction...")
             shutil.copy2(target_apk, apk_tmp)
             apk_linux_path = apk_tmp
     else:
-        print("[!] WARNING: Running on Windows. The APK contains case-conflicting")
-        print("    resource files (res/hq.xml vs res/HQ.xml) that Windows cannot")
-        print("    distinguish. The patched APK may crash on launch.")
-        print("    For a working patch, run this script under WSL (Linux).")
         apk_linux_path = target_apk
         temp_dir = os.path.join(repo_dir, "temp-decompiled")
         if os.path.exists(temp_dir):
@@ -711,8 +738,7 @@ def main():
     copy_folder_recursive(patches_src, patches_dst)
 
     # 8. Rebuild APK
-    # Since we used -r, apktool only re-smals the .dex; resources are raw-copied.
-    # Keep the intermediate APK in /tmp (Linux) to avoid NTFS path issues.
+    # Since we used -r, apktool only re-smalis the .dex; resources are raw-copied.
     if on_linux:
         patched_apk = '/tmp/anslayer-patched.apk'
     else:
@@ -723,6 +749,11 @@ def main():
         print("[-] Compilation failed.")
         shutil.rmtree(temp_dir)
         sys.exit(1)
+
+    # 8b. On Windows: restore case-sensitive resources lost to NTFS collisions.
+    # Python's zipfile is case-sensitive even on Windows, so this works correctly.
+    if not on_linux:
+        fix_missing_case_sensitive_resources(target_apk, patched_apk)
 
     # 9. Keystore Handling and Signing
     keystore_path = os.path.join(repo_dir, "local-release-key.jks")
