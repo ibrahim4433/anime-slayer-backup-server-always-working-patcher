@@ -16,3 +16,5 @@ logcat.txt
 
 # Ignore IDE temporary files
 unleash-repo-schema-v1-codeium-language-server.json
+/temp-decompiled
+apktool.jar
