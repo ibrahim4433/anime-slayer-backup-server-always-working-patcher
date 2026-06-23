@@ -465,9 +465,9 @@ def main():
         print("[+] Cleaning up previous temporary folders...")
         shutil.rmtree(temp_dir)
 
-    # 2. Decompile using apktool
-    print("[+] Decompiling APK (this may take a minute)...")
-    success, _, _ = run_command(f'apktool d "{target_apk}" -o "{temp_dir}"')
+    # 2. Decompile using apktool (ignore resources for speed and compatibility)
+    print("[+] Decompiling APK (ignoring resources for speed and compatibility)...")
+    success, _, _ = run_command(f'apktool d -r "{target_apk}" -o "{temp_dir}"')
     if not success:
         print("[-] Decompilation failed. Ensure apktool is installed and in your PATH.")
         sys.exit(1)
@@ -521,15 +521,12 @@ def main():
 
     # 6. Rebuild APK
     patched_apk = os.path.join(repo_dir, "anime-slayer-patched.apk")
-    print("[+] Rebuilding patched APK (compiling resources)...")
-    success, _, _ = run_command(f'apktool b "{temp_dir}" -o "{patched_apk}" --use-aapt2')
+    print("[+] Rebuilding patched APK (assembling smali bytecode)...")
+    success, _, _ = run_command(f'apktool b "{temp_dir}" -o "{patched_apk}"')
     if not success:
-        print("[-] Compilation failed with aapt2. Trying normal aapt...")
-        success, _, _ = run_command(f'apktool b "{temp_dir}" -o "{patched_apk}"')
-        if not success:
-            print("[-] Compilation failed completely.")
-            shutil.rmtree(temp_dir)
-            sys.exit(1)
+        print("[-] Compilation failed.")
+        shutil.rmtree(temp_dir)
+        sys.exit(1)
 
     # 7. Keystore Handling and Signing
     keystore_path = "/tmp/my-release-key.jks"
