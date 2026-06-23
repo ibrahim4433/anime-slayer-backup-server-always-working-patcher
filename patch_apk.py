@@ -523,6 +523,28 @@ def get_apktool_command(java_cmd):
         if java_cmd:
             return f'"{java_cmd}" -jar "apktool.jar"'
             
+def find_java_windows():
+    if sys.platform != 'win32':
+        return None
+    # Check common install directories for Java
+    program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+    
+    scan_dirs = [
+        os.path.join(program_files, "Eclipse Adoptium"),
+        os.path.join(program_files, "Eclipse Foundation"),
+        os.path.join(program_files, "Java"),
+        os.path.join(program_files, "Microsoft"),
+        os.path.join(program_files_x86, "Java"),
+    ]
+    
+    for base in scan_dirs:
+        if os.path.exists(base):
+            for root, dirs, files in os.walk(base):
+                if "java.exe" in files:
+                    # Verify it has keytool and jarsigner adjacent
+                    if "keytool.exe" in files and "jarsigner.exe" in files:
+                        return os.path.join(root, "java.exe")
     return None
 
 def main():
@@ -533,12 +555,17 @@ def main():
 
     # 1. Check requirements (Java)
     java_cmd = shutil.which("java")
+    if not java_cmd and sys.platform == 'win32':
+        # Try to locate Java automatically in typical Windows installation folders
+        java_cmd = find_java_windows()
+
     if not java_cmd:
-        print("[-] Java not found in system PATH!")
+        print("[-] Java not found in system PATH or standard directories!")
         if sys.platform != 'win32':
             print("    Please run: sudo apt update && sudo apt install -y default-jdk")
         else:
             print("    Please install Java JDK/JRE from: https://adoptium.net/")
+            print("    (If you just installed it, please restart VS Code/your terminal to refresh your environment variables)")
         sys.exit(1)
 
     keytool_cmd = shutil.which("keytool")
