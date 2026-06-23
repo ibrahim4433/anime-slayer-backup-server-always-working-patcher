@@ -18,3 +18,4 @@ logcat.txt
 unleash-repo-schema-v1-codeium-language-server.json
 /temp-decompiled
 apktool.jar
+__pycache__/patch_apk.cpython-313.pyc
