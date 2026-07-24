@@ -43,23 +43,58 @@ We have provided a fully self-contained, cross-platform automation script `patch
 
 ### Prerequisites
 * **Python 3.x**
-* **Java Development Kit (JDK)** (for compiler execution, signing, and key generation)
-* *(Note: `apktool` and `openssl` are NOT required! The script will automatically download `apktool.jar` if missing, and certificate extraction is done in pure Python).*
+* **Java JDK** (for compiling and signing)
+* **apktool** & **aapt** (required mainly for Termux)
 
 ### How to Patch and Build
-1. Place the **original Anime Slayer v1.5.10 APK** in this repository folder.
-2. Run the script:
-   * **Linux/WSL:** `python3 patch_apk.py`
-   * **Windows:** `python patch_apk.py`
+
+#### 📱 On Android (via Termux)
+You can patch the APK directly on your phone using Termux!
+1. Install Termux from F-Droid (do not use the Play Store version).
+2. Open Termux and run these commands to set up:
+   ```bash
+   pkg update -y
+   pkg install -y python git openjdk-17 apktool aapt
+   ```
+3. Clone this repository and move into it:
+   ```bash
+   git clone https://github.com/ibrahim4433/anime-slayer-backup-server-always-working-patcher.git
+   cd anime-slayer-backup-server-always-working-patcher
+   ```
+4. Place the **original Anime Slayer v1.5.10 APK** in the cloned folder (you can use your file manager to copy it into the Termux directory).
+5. Run the script:
+   ```bash
+   python patch_apk.py
+   ```
+
+#### 🪟 On Windows
+1. Install **Python** directly from [python.org](https://www.python.org/downloads/) (do NOT use the Microsoft Store version).
+2. Install **Java JDK** from [adoptium.net](https://adoptium.net/).
+3. Place the **original Anime Slayer v1.5.10 APK** in this repository folder.
+4. Run the script from PowerShell or Command Prompt using the Python launcher:
+   ```powershell
+   py patch_apk.py
+   ```
+
+#### 🐧 On Linux / WSL
+1. Install dependencies:
+   ```bash
+   sudo apt update && sudo apt install -y python3 default-jdk
+   ```
+2. Place the **original APK** in this folder.
+3. Run the script:
+   ```bash
+   python3 patch_apk.py
+   ```
 
 ### What the script does under the hood:
 1. **Decompiles:** Automatically decompiles the original APK to a temporary directory.
-2. **Extracts Certificate:** Extracts the original APK certificate (`CERT.RSA`) from metadata and converts it to DER.
-3. **Generates Spoofer:** Dynamically creates the `SignatureSpoofer` Smali files wrapping the extracted original certificate.
-4. **Applies Patches:** Overwrites the original smali files in the decompiled directory with the mod files inside `patch-files/`.
-5. **Rebuilds APK:** Compiles the patched directories back into a new APK.
-6. **Signs APK:** Generates a local keystore on the fly (if it doesn't exist) and signs the new build.
-7. **Clean up:** Automatically deletes the temporary decompile directory and outputs the ready-to-use APK: **`Anime_Slayer_v1.5.10_Patched_Working.apk`**.
+2. **Extracts Certificate:** Extracts the original APK certificate (`CERT.RSA`) from metadata.
+3. **Generates Spoofer:** Dynamically creates the `SignatureSpoofer` Smali files using the extracted original certificate bytes.
+4. **Applies Patches:** Overwrites the original smali files with the mod files inside `patch-files/`.
+5. **Rebuilds APK:** Compiles the patched directories back into a new APK. (On Windows, perfectly bypasses NTFS limitations by automatically injecting pristine resources).
+6. **Signs APK:** Generates a local keystore on the fly and signs the new build.
+7. **Clean up:** Automatically deletes the temporary directory and outputs the ready-to-use APK: **`Anime_Slayer_v1.5.10_Patched_Working.apk`**.
 
 ---
 

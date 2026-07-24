@@ -508,13 +508,14 @@ def download_apktool():
         return False
 
 def get_apktool_command(java_cmd):
-    if os.path.exists("apktool.jar"):
-        if java_cmd:
-            return f'"{java_cmd}" -jar "apktool.jar"'
-    
+    # Prefer system apktool if available (critical for Termux since it bundles native aarch64 aapt)
     apktool_cmd = shutil.which("apktool")
     if apktool_cmd:
         return f'"{apktool_cmd}"'
+        
+    if os.path.exists("apktool.jar"):
+        if java_cmd:
+            return f'"{java_cmd}" -jar "apktool.jar"'
     
     if download_apktool():
         if java_cmd:
@@ -529,6 +530,10 @@ def is_wsl():
             return 'microsoft' in f.read().lower()
     except Exception:
         return False
+
+def is_termux():
+    """Detect if we are running inside Android Termux."""
+    return 'com.termux' in os.environ.get('PREFIX', '')
 
 def find_java_windows():
     if sys.platform != 'win32':
@@ -593,7 +598,9 @@ def main():
 
     if not java_cmd:
         print("[-] Java not found in system PATH or standard directories!")
-        if sys.platform != 'win32':
+        if is_termux():
+            print("    Please run: pkg update && pkg install -y openjdk-17 apktool aapt")
+        elif sys.platform != 'win32':
             print("    Please run: sudo apt update && sudo apt install -y default-jdk")
         else:
             print("    Please install Java JDK/JRE from: https://adoptium.net/")
@@ -650,7 +657,8 @@ def main():
             try:
                 apk_win = subprocess.check_output(['wslpath', '-w', target_apk]).decode().strip()
                 apk_win_escaped = apk_win.replace("'", "''")
-                apk_tmp = '/tmp/anslayer_source.apk'
+                import tempfile
+                apk_tmp = os.path.join(tempfile.gettempdir(), 'anslayer_source.apk')
                 
                 # Stream the file from Windows straight through standard output to bypass WSL's 
                 # restrictive NTFS file ownership mapping that causes "Permission denied".
@@ -739,7 +747,8 @@ def main():
     # 8. Rebuild APK
     # Since we used -r, apktool only re-smalis the .dex; resources are raw-copied.
     if on_linux:
-        patched_apk = '/tmp/anslayer-patched.apk'
+        import tempfile
+        patched_apk = os.path.join(tempfile.gettempdir(), 'anslayer-patched.apk')
     else:
         patched_apk = os.path.join(repo_dir, "anime-slayer-patched.apk")
     print("[+] Rebuilding patched APK...")
