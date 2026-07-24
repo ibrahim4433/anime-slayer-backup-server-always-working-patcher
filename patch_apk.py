@@ -552,6 +552,33 @@ def find_java_windows():
                         return os.path.join(root, "java.exe")
     return None
 
+def fix_windows_resources(original_apk_path, patched_apk_path):
+    """
+    On Windows, NTFS collapses case-differing filenames (e.g. res/hq.xml and res/HQ.xml).
+    Since we use apktool's raw resources mode (-r), we don't modify ANY resources or assets.
+    To perfectly bypass NTFS corruption, we replace the entire res/, assets/, and resources.arsc 
+    in the rebuilt APK with the pristine ones from the original APK using Python's zipfile.
+    """
+    print("[+] Restoring pristine res/ and assets/ from original APK to bypass NTFS corruption...")
+    tmp_path = patched_apk_path + '.fixing'
+    import zipfile
+    with zipfile.ZipFile(patched_apk_path, 'r') as built_z, \
+         zipfile.ZipFile(tmp_path, 'w', compression=zipfile.ZIP_STORED) as out_z, \
+         zipfile.ZipFile(original_apk_path, 'r') as orig_z:
+        
+        # 1. Copy everything EXCEPT res/, assets/, and resources.arsc from the built APK
+        for info in built_z.infolist():
+            if info.filename.startswith('res/') or info.filename.startswith('assets/') or info.filename == 'resources.arsc':
+                continue
+            out_z.writestr(info, built_z.read(info.filename))
+            
+        # 2. Copy ALL res/, assets/, and resources.arsc from the original APK
+        for info in orig_z.infolist():
+            if info.filename.startswith('res/') or info.filename.startswith('assets/') or info.filename == 'resources.arsc':
+                out_z.writestr(info, orig_z.read(info.filename))
+                
+    os.replace(tmp_path, patched_apk_path)
+    print("[+] Resources perfectly restored!")
 
 def main():
     repo_dir = os.path.dirname(os.path.abspath(__file__))
@@ -673,8 +700,6 @@ def main():
             print("[+] Cleaning up previous temporary folders...")
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir)
-        print("[+] Enabling Windows NTFS case-sensitivity for reliable extraction...")
-        subprocess.run(f'fsutil.exe file setCaseSensitiveInfo "{temp_dir}" enable', shell=True)
 
     # 3. Extract original certificate (from the Linux-readable APK path)
     cert_bytes = extract_cert_from_apk(apk_linux_path)
@@ -724,6 +749,10 @@ def main():
         shutil.rmtree(temp_dir)
         sys.exit(1)
 
+    # 8b. On Windows: perfectly restore resources from original APK
+    if not on_linux:
+        fix_windows_resources(target_apk, patched_apk)
+
     # 9. Keystore Handling and Signing
     keystore_path = os.path.join(repo_dir, "local-release-key.jks")
     keystore_alias = "alias_name"
@@ -768,7 +797,7 @@ def main():
         if os.path.exists(final_path):
             os.remove(final_path)
         shutil.copy2(patched_apk, final_path)
-        if on_linux and patched_apk != final_path:
+        if patched_apk != final_path:
             os.remove(patched_apk)
 
     print(f"\n[+] SUCCESS! Final patched and signed APK: {final_path}")
