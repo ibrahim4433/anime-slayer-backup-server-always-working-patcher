@@ -552,51 +552,6 @@ def find_java_windows():
                         return os.path.join(root, "java.exe")
     return None
 
-def fix_missing_case_sensitive_resources(original_apk_path, patched_apk_path):
-    """
-    On Windows, NTFS collapses case-differing filenames (e.g. res/hq.xml and
-    res/HQ.xml) into one file when apktool extracts them to disk. The rebuilt
-    APK then silently drops the lowercase variant, causing a crash at runtime
-    because resources.arsc still points to res/hq.xml.
-
-    Fix: Python's zipfile module treats zip entries as raw strings — it IS
-    case-sensitive even on Windows. We compare the original APK's entry list
-    against the built APK, find any res/ entries that are missing by exact
-    case, and inject them directly from the original APK into the built one,
-    never touching the NTFS filesystem for those files.
-    """
-    with zipfile.ZipFile(original_apk_path, 'r') as orig_z:
-        orig_names = set(orig_z.namelist())
-    with zipfile.ZipFile(patched_apk_path, 'r') as built_z:
-        built_names = set(built_z.namelist())
-
-    # Only care about res/ files — META-INF etc. are intentionally different
-    missing_res = {n for n in (orig_names - built_names) if n.startswith('res/')}
-
-    if not missing_res:
-        print("[+] No missing case-sensitive resources detected.")
-        return
-
-    print(f"[+] Injecting {len(missing_res)} case-sensitive resource(s) lost on Windows NTFS:")
-    for name in sorted(missing_res):
-        print(f"      + {name}")
-
-    # Rebuild the APK zip with the missing entries added in.
-    # We write to a temp file then replace atomically.
-    tmp_path = patched_apk_path + '.fixing'
-    with zipfile.ZipFile(patched_apk_path, 'r') as built_z, \
-         zipfile.ZipFile(tmp_path, 'w', compression=zipfile.ZIP_STORED) as out_z:
-        # Copy every existing entry preserving compression and metadata
-        for info in built_z.infolist():
-            out_z.writestr(info, built_z.read(info.filename))
-        # Inject the missing ones straight from the original APK bytes
-        with zipfile.ZipFile(original_apk_path, 'r') as orig_z:
-            for name in sorted(missing_res):
-                orig_info = orig_z.getinfo(name)
-                out_z.writestr(orig_info, orig_z.read(name))
-
-    os.replace(tmp_path, patched_apk_path)
-    print(f"[+] Successfully restored {len(missing_res)} resource(s). APK is now correct.")
 
 def main():
     repo_dir = os.path.dirname(os.path.abspath(__file__))
@@ -661,23 +616,39 @@ def main():
     if not os.access(target_apk, os.R_OK):
         # On Linux/WSL with an NTFS-mounted path the file may be owned by the
         # Windows user (UID 10067) and not readable by the WSL user (UID 1000).
-        # The user must fix permissions first — chmod via WSL doesn't work on
-        # NTFS, but changing the file's Windows ACL does.
         if sys.platform != 'win32' and target_apk.startswith('/mnt/'):
             print(f"[-] Cannot read APK: {os.path.basename(target_apk)}")
             print("    The file has Windows-only read permissions.")
-            print("    Fix by running this in your Windows Command Prompt (cmd.exe):")
-            apk_win = target_apk.replace('/mnt/c/', 'C:\\\\').replace('/', '\\\\')
-            print(f"        icacls \"{apk_win}\" /grant Everyone:R")
-            print("    Or right-click the APK in Explorer > Properties > Security > Edit")
-            print("    and grant Read permission to your Windows user.")
+            print("    Attempting to automatically copy it to Linux filesystem via Windows PowerShell...")
+            try:
+                apk_win = subprocess.check_output(['wslpath', '-w', target_apk]).decode().strip()
+                apk_win_escaped = apk_win.replace("'", "''")
+                apk_tmp = '/tmp/anslayer_source.apk'
+                
+                # Stream the file from Windows straight through standard output to bypass WSL's 
+                # restrictive NTFS file ownership mapping that causes "Permission denied".
+                ps_script = f"$fs = [System.IO.File]::OpenRead('{apk_win_escaped}'); $out = [Console]::OpenStandardOutput(); $fs.CopyTo($out); $fs.Close()"
+                
+                with open(apk_tmp, 'wb') as f:
+                    res = subprocess.run(['powershell.exe', '-NoProfile', '-Command', ps_script], stdout=f)
+                
+                if res.returncode == 0 and os.path.exists(apk_tmp) and os.path.getsize(apk_tmp) > 0:
+                    print("    [+] Stream copy successful. Using the copied APK.")
+                    os.chmod(apk_tmp, 0o777)
+                    target_apk = apk_tmp
+                else:
+                    print(f"    [-] Failed to stream file automatically via PowerShell (Exit code {res.returncode}).")
+                    sys.exit(1)
+            except Exception as e:
+                print(f"    [-] Exception during automatic copy: {e}")
+                sys.exit(1)
         else:
             print(f"[-] Error: Input file '{os.path.basename(target_apk)}' is not readable!")
             if sys.platform != 'win32':
                 print(f'    Please run: chmod 644 "{target_apk}"')
             else:
                 print("    Please check the read permissions of this APK file.")
-        sys.exit(1)
+            sys.exit(1)
 
     # --- Temp directory strategy ---
     # On Linux/WSL: use /tmp (native ext4, case-sensitive) so both res/hq.xml
@@ -701,6 +672,9 @@ def main():
         if os.path.exists(temp_dir):
             print("[+] Cleaning up previous temporary folders...")
             shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir)
+        print("[+] Enabling Windows NTFS case-sensitivity for reliable extraction...")
+        subprocess.run(f'fsutil.exe file setCaseSensitiveInfo "{temp_dir}" enable', shell=True)
 
     # 3. Extract original certificate (from the Linux-readable APK path)
     cert_bytes = extract_cert_from_apk(apk_linux_path)
@@ -714,13 +688,13 @@ def main():
     #  a) resources.arsc is kept original and stays in sync with the raw res/ files.
     #  b) Much faster: no XML decoding/recompilation needed.
     print("[+] Decompiling APK (raw mode, this is fast)...")
-    success, _, _ = run_command(f'{apktool_cmd} d -r "{apk_linux_path}" -o "{temp_dir}"')
+    success, _, _ = run_command(f'{apktool_cmd} d -f -r "{apk_linux_path}" -o "{temp_dir}"')
     if not success:
         print("[-] Decompilation failed.")
         sys.exit(1)
 
     # 5. Fix invalid resource names containing $
-    fix_invalid_resource_names(temp_dir)
+    # (Removed because it is no longer needed in -r raw mode)
 
     # 6. Generate dynamic SignatureSpoofer smali files
     spoofer_dir = os.path.join(temp_dir, "smali", "com", "anslayer")
@@ -749,11 +723,6 @@ def main():
         print("[-] Compilation failed.")
         shutil.rmtree(temp_dir)
         sys.exit(1)
-
-    # 8b. On Windows: restore case-sensitive resources lost to NTFS collisions.
-    # Python's zipfile is case-sensitive even on Windows, so this works correctly.
-    if not on_linux:
-        fix_missing_case_sensitive_resources(target_apk, patched_apk)
 
     # 9. Keystore Handling and Signing
     keystore_path = os.path.join(repo_dir, "local-release-key.jks")
